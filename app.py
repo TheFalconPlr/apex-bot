@@ -309,10 +309,12 @@ def status():
         return jsonify({"open_trade": open_trade, "last_price": last_price})
 
 
+# ── Startup (runs on import so gunicorn picks it up too) ───────────────
+init_db()
+monitor_thread = threading.Thread(target=price_monitor, daemon=True)
+monitor_thread.start()
+
 # ── Entry point ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
-    monitor_thread = threading.Thread(target=price_monitor, daemon=True)
-    monitor_thread.start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
