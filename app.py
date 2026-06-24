@@ -2,16 +2,9 @@ import os
 import sqlite3
 import threading
 import time
+import requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template_string
-
-try:
-    import oandapyV20
-    import oandapyV20.endpoints.pricing as pricing
-    OANDA_OK = True
-except ImportError:
-    OANDA_OK = False
-    print("[Startup] oandapyV20 not installed")
 
 app = Flask(__name__)
 
@@ -24,15 +17,30 @@ MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))
 OZ_FULL     = LOT_SIZE * 100
 DB_PATH     = "trades.db"
 
+OANDA_URL   = f"https://api-fxpractice.oanda.com/v3/accounts/{ACCOUNT_ID}/pricing"
+
 lock       = threading.Lock()
 open_trade = None
 last_price = None
 
+def get_price():
+    """Fetch current XAU/USD bid/ask from OANDA practice REST API."""
+    headers = {"Authorization": f"Bearer {OANDA_TOKEN}"}
+    params  = {"instruments": INSTRUMENT}
+    r = requests.get(
+        f"https://api-fxpractice.oanda.com/v3/accounts/{ACCOUNT_ID}/pricing",
+        headers=headers, params=params, timeout=10
+    )
+    r.raise_for_status()
+    data  = r.json()["prices"][0]
+    bid   = float(data["bids"][0]["price"])
+    ask   = float(data["asks"][0]["price"])
+    return bid, ask
+
 def adjust_levels(action, tp1, sl):
     if action == "LONG":
         return tp1 - SLIPPAGE, sl - SLIPPAGE
-    else:
-        return tp1 + SLIPPAGE, sl + SLIPPAGE
+    return tp1 + SLIPPAGE, sl + SLIPPAGE
 
 def calc_rr(action, entry, adj_tp1, adj_sl):
     if action == "LONG":
@@ -41,9 +49,7 @@ def calc_rr(action, entry, adj_tp1, adj_sl):
     else:
         reward = entry   - adj_tp1
         risk   = adj_sl  - entry
-    if risk <= 0:
-        return 0.0
-    return reward / risk
+    return (reward / risk) if risk > 0 else 0.0
 
 def calc_pnl(action, entry, exit_price, oz):
     if action == "LONG":
@@ -76,31 +82,18 @@ def init_db():
         """)
         conn.commit()
 
-# ── Price monitor — POLLS every 2 seconds (no streaming, works on Railway) ──
 def price_monitor():
     global open_trade, last_price
 
-    if not OANDA_OK:
-        print("[Monitor] oandapyV20 not installed — price monitoring disabled.")
-        return
-
     if not OANDA_TOKEN or not ACCOUNT_ID:
-        print("[Monitor] OANDA_TOKEN or ACCOUNT_ID missing — add them in Railway Variables.")
+        print("[Monitor] OANDA_TOKEN or ACCOUNT_ID not set — check Railway Variables.")
         return
 
-    print(f"[Monitor] Starting — account {ACCOUNT_ID[:8]}...")
-    client = oandapyV20.API(access_token=OANDA_TOKEN, environment="practice")
+    print(f"[Monitor] Starting with account {ACCOUNT_ID}")
 
     while True:
         try:
-            r = pricing.PricingInfo(
-                accountID=ACCOUNT_ID,
-                params={"instruments": INSTRUMENT}
-            )
-            client.request(r)
-            price_data = r.response["prices"][0]
-            bid = float(price_data["bids"][0]["price"])
-            ask = float(price_data["asks"][0]["price"])
+            bid, ask = get_price()
             mid = (bid + ask) / 2.0
 
             with lock:
@@ -141,6 +134,9 @@ def price_monitor():
 
             time.sleep(2)
 
+        except requests.exceptions.HTTPError as e:
+            print(f"[Monitor] OANDA HTTP error: {e.response.status_code} — {e.response.text[:200]}")
+            time.sleep(15)
         except Exception as e:
             print(f"[Monitor] Error: {e} — retrying in 10s")
             time.sleep(10)
@@ -232,8 +228,6 @@ DASHBOARD = """
   .badge-MANUAL{background:#2a2a3a;color:#8890b0}
   .info-bar{font-size:11px;color:#3a3e55;padding:6px 20px}
   .tag{display:inline-block;background:#1a1d33;border:1px solid #2a2d45;border-radius:4px;padding:2px 8px;font-size:11px;color:#6b6f8e;margin-right:6px}
-  .dot-green{width:8px;height:8px;border-radius:50%;background:#1dce8a;display:inline-block;margin-right:5px}
-  .dot-red{width:8px;height:8px;border-radius:50%;background:#e24b4a;display:inline-block;margin-right:5px}
 </style>
 </head>
 <body>
@@ -295,27 +289,15 @@ DASHBOARD = """
     {% endif %}
   </div>
 
-  <div class="card" style="min-width:180px;">
+  <div class="card" style="min-width:160px;">
     <h2>XAU/USD</h2>
     {% if last_price %}
-      <div style="display:flex;align-items:center;margin-bottom:6px;">
-        <span class="dot-green"></span>
-        <span style="font-size:11px;color:#1dce8a;">OANDA connected</span>
-      </div>
+      <div style="font-size:11px;color:#1dce8a;margin-bottom:8px;">● OANDA connected</div>
       <div style="font-size:26px;font-weight:700;color:#e8e9f0;margin-bottom:6px;">{{ "%.2f"|format(last_price.mid) }}</div>
       <div style="font-size:12px;color:#6b6f8e;">Bid {{ "%.2f"|format(last_price.bid) }} | Ask {{ "%.2f"|format(last_price.ask) }}</div>
     {% else %}
-      <div style="display:flex;align-items:center;margin-bottom:8px;">
-        <span class="dot-red"></span>
-        <span style="font-size:11px;color:#e24b4a;">Not connected</span>
-      </div>
-      <div style="font-size:12px;color:#3a3e55;line-height:1.6;">
-        Go to Railway<br>→ your project<br>→ Variables tab<br><br>
-        Add:<br>
-        <span style="color:#6b6f8e;">OANDA_TOKEN</span><br>
-        <span style="color:#6b6f8e;">ACCOUNT_ID</span><br><br>
-        Then click <span style="color:#7090ff;">Redeploy</span>
-      </div>
+      <div style="font-size:11px;color:#e24b4a;margin-bottom:8px;">● Not connected</div>
+      <div style="font-size:12px;color:#3a3e55;line-height:1.8;">Check Railway logs<br>for the error message</div>
     {% endif %}
   </div>
 
@@ -392,9 +374,13 @@ def dashboard():
 @app.route("/status")
 def status():
     with lock:
-        return jsonify({"open_trade": open_trade, "last_price": last_price,
-                        "oanda_connected": last_price is not None,
-                        "config": {"slippage": SLIPPAGE, "min_rr": MIN_RR, "lot_size": LOT_SIZE}})
+        return jsonify({
+            "oanda_connected": last_price is not None,
+            "open_trade": open_trade,
+            "last_price": last_price,
+            "config": {"slippage": SLIPPAGE, "min_rr": MIN_RR, "lot_size": LOT_SIZE,
+                       "account_id_set": bool(ACCOUNT_ID), "token_set": bool(OANDA_TOKEN)}
+        })
 
 init_db()
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
