@@ -201,139 +201,240 @@ DASHBOARD = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta http-equiv="refresh" content="10">
-<title>Apex Paper Bot — {{ month }}</title>
+<title>Apex Paper Bot | Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#0b0d17;color:#c8cad8;font-family:'Segoe UI',sans-serif;font-size:14px}
-  .top{display:flex;gap:16px;padding:20px;flex-wrap:wrap}
-  .card{background:#13162a;border:1px solid #222640;border-radius:10px;padding:18px 22px}
-  .card h2{font-size:11px;color:#6b6f8e;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
-  .pnl-big{font-size:36px;font-weight:700;margin-bottom:14px}
-  .pos{color:#1dce8a}.neg{color:#e24b4a}.neu{color:#8890b0}
-  .stat-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1a1d33}
-  .stat-row:last-child{border-bottom:none}
-  .stat-label{color:#6b6f8e}.stat-val{font-weight:600}
-  .level-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
-  .long-dir{color:#1dce8a}.short-dir{color:#e24b4a}
-  .history{padding:0 20px 30px}
-  .history h3{font-size:12px;color:#6b6f8e;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
-  table{width:100%;border-collapse:collapse}
-  th{font-size:11px;color:#6b6f8e;text-transform:uppercase;padding:8px 12px;text-align:left;background:#0f1121;border-bottom:1px solid #1e2140}
-  td{padding:9px 12px;border-bottom:1px solid #141728;font-size:13px}
-  tr:hover td{background:#141930}
-  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase}
-  .badge-WIN{background:#0d3d2a;color:#1dce8a}
-  .badge-LOSS{background:#3d1212;color:#e24b4a}
-  .badge-OPEN{background:#1a2060;color:#7090ff}
-  .badge-MANUAL{background:#2a2a3a;color:#8890b0}
-  .info-bar{font-size:11px;color:#3a3e55;padding:6px 20px}
-  .tag{display:inline-block;background:#1a1d33;border:1px solid #2a2d45;border-radius:4px;padding:2px 8px;font-size:11px;color:#6b6f8e;margin-right:6px}
+  :root {
+    --bg-dark: #0a0c14;
+    --bg-card: rgba(22, 27, 46, 0.65);
+    --border-color: rgba(255, 255, 255, 0.06);
+    --text-main: #e2e8f0;
+    --text-muted: #94a3b8;
+    --color-win: #10b981;
+    --color-win-bg: rgba(16, 185, 129, 0.15);
+    --color-loss: #f43f5e;
+    --color-loss-bg: rgba(244, 63, 94, 0.15);
+    --color-open: #3b82f6;
+    --color-open-bg: rgba(59, 130, 246, 0.15);
+    --color-manual: #8b5cf6;
+    --color-manual-bg: rgba(139, 92, 246, 0.15);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+  body { 
+    background: radial-gradient(circle at top right, #151a30, var(--bg-dark)); 
+    color: var(--text-main); 
+    min-height: 100vh; 
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  
+  /* Layout */
+  .container { max-width: 1400px; margin: 0 auto; padding: 30px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
+  .title-group h1 { font-size: 28px; font-weight: 800; background: linear-gradient(to right, #ffffff, #94a3b8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; }
+  .title-group p { color: var(--text-muted); font-size: 14px; margin-top: 4px; font-weight: 500; }
+  
+  .tags { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tag { background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; color: var(--text-muted); backdrop-filter: blur(4px); }
+  
+  /* Cards Grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 30px; }
+  .card { 
+    background: var(--bg-card); 
+    backdrop-filter: blur(12px); 
+    border: 1px solid var(--border-color); 
+    border-radius: 16px; 
+    padding: 24px; 
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+    transition: transform 0.2s ease, border-color 0.2s ease;
+  }
+  .card:hover { border-color: rgba(255,255,255,0.15); transform: translateY(-2px); }
+  .card h2 { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 16px; font-weight: 700; }
+  
+  /* Typography & Colors */
+  .pnl-big { font-size: 42px; font-weight: 800; margin-bottom: 20px; letter-spacing: -1px; }
+  .pos { color: var(--color-win); } 
+  .neg { color: var(--color-loss); } 
+  .neu { color: var(--text-muted); }
+  
+  /* Stats & Levels */
+  .stat-row, .level-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .stat-row:last-child, .level-row:last-child { border-bottom: none; }
+  .stat-label { color: var(--text-muted); font-weight: 500; }
+  .stat-val { font-weight: 700; }
+  
+  /* Buttons */
+  .btn-close { 
+    width: 100%; background: var(--color-loss-bg); color: var(--color-loss); border: 1px solid rgba(244,63,94,0.3);
+    padding: 12px; border-radius: 8px; font-weight: 700; cursor: pointer; transition: all 0.2s ease; margin-top: 16px;
+  }
+  .btn-close:hover { background: var(--color-loss); color: #fff; box-shadow: 0 0 15px rgba(244,63,94,0.4); }
+  
+  /* Status Dot */
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; box-shadow: 0 0 8px currentColor; }
+  .status-connected { color: var(--color-win); background: var(--color-win); }
+  .status-error { color: var(--color-loss); background: var(--color-loss); }
+
+  /* Table */
+  .table-container { 
+    background: var(--bg-card); backdrop-filter: blur(12px); border: 1px solid var(--border-color); 
+    border-radius: 16px; overflow-x: auto; box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+  }
+  .table-header { padding: 20px 24px; border-bottom: 1px solid var(--border-color); font-size: 14px; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; text-align: left; }
+  th { font-size: 11px; color: var(--text-muted); text-transform: uppercase; padding: 14px 24px; background: rgba(0,0,0,0.2); font-weight: 700; letter-spacing: 0.5px; }
+  td { padding: 14px 24px; border-bottom: 1px solid rgba(255,255,255,0.03); font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  
+  /* Badges */
+  .badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge-WIN { background: var(--color-win-bg); color: var(--color-win); border: 1px solid rgba(16,185,129,0.3); }
+  .badge-LOSS { background: var(--color-loss-bg); color: var(--color-loss); border: 1px solid rgba(244,63,94,0.3); }
+  .badge-OPEN { background: var(--color-open-bg); color: var(--color-open); border: 1px solid rgba(59,130,246,0.3); }
+  .badge-MANUAL { background: var(--color-manual-bg); color: var(--color-manual); border: 1px solid rgba(139,92,246,0.3); }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0a0c14; }
+  ::-webkit-scrollbar-thumb { background: #2a314d; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3b446b; }
 </style>
 </head>
 <body>
-<div style="padding:20px 20px 0;display:flex;align-items:center;gap:12px;">
-  <div style="font-size:20px;font-weight:700;color:#e8e9f0;">Apex Paper Bot</div>
-  <div style="font-size:13px;color:#6b6f8e;">{{ month }} — paper trading only</div>
-</div>
-<div class="info-bar">
-  <span class="tag">100% exit @ TP1</span>
-  <span class="tag">{{ slippage }}pt slippage</span>
-  <span class="tag">min {{ min_rr }}:1 RR</span>
-  <span class="tag">{{ lot_size }} lot = ${{ (lot_size*100)|int }}/pt</span>
-  <span style="color:#2a2e45;">Auto-refreshes every 10s</span>
-</div>
 
-<div class="top">
-
-  <div class="card" style="min-width:220px;">
-    <h2>{{ month }} P&L</h2>
-    {% if total >= 0 %}
-      <div class="pnl-big pos">+${{ "%.0f"|format(total) }}</div>
-    {% else %}
-      <div class="pnl-big neg">-${{ "%.0f"|format(total|abs) }}</div>
-    {% endif %}
-    <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-val">{{ count }}</span></div>
-    <div class="stat-row"><span class="stat-label">Wins</span><span class="stat-val pos">{{ wins }}</span></div>
-    <div class="stat-row"><span class="stat-label">Losses</span><span class="stat-val neg">{{ losses }}</span></div>
-    <div class="stat-row"><span class="stat-label">Win rate</span><span class="stat-val">{{ win_rate }}%</span></div>
-    <div class="stat-row"><span class="stat-label">Best trade</span><span class="stat-val pos">{% if best > 0 %}+${{ "%.0f"|format(best) }}{% else %}—{% endif %}</span></div>
-    <div class="stat-row"><span class="stat-label">Worst trade</span><span class="stat-val neg">{% if worst < 0 %}-${{ "%.0f"|format(worst|abs) }}{% else %}—{% endif %}</span></div>
-    <div class="stat-row"><span class="stat-label">Skipped (RR)</span><span class="stat-val neu">{{ skipped }}</span></div>
+<div class="container">
+  
+  <div class="header">
+    <div class="title-group">
+      <h1>Apex Paper Bot</h1>
+      <p>{{ month }} — Paper Trading Automated System</p>
+    </div>
+    <div class="tags">
+      <span class="tag">Auto-refreshes 10s</span>
+      <span class="tag">100% exit @ TP1</span>
+      <span class="tag">{{ slippage }}pt Slippage</span>
+      <span class="tag">Min RR {{ min_rr }}:1</span>
+      <span class="tag">{{ lot_size }} Lot (${{ (lot_size*100)|int }}/pt)</span>
+    </div>
   </div>
 
-  <div class="card" style="min-width:270px;">
-    <h2>Open Trade</h2>
-    {% if open_trade %}
-      <div style="font-size:22px;font-weight:700;margin-bottom:12px;" class="{% if open_trade.action=='LONG' %}long-dir{% else %}short-dir{% endif %}">
-        {{ open_trade.action }} &nbsp;<span style="font-size:13px;color:#6b6f8e;font-weight:400;">RR {{ "%.2f"|format(open_trade.rr) }}</span>
-      </div>
-      <div class="level-row"><span style="color:#6b6f8e;">Entry</span><span>{{ "%.2f"|format(open_trade.entry) }}</span></div>
-      <div class="level-row"><span style="color:#e24b4a;">Stop Loss (adj)</span><span>{{ "%.2f"|format(open_trade.sl) }}</span></div>
-      <div class="level-row"><span style="color:#1dce8a;">TP1 — 100% exit (adj)</span><span>{{ "%.2f"|format(open_trade.tp1) }}</span></div>
-      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #1e2140;">
-        <div class="level-row">
-          <span style="color:#6b6f8e;">Unrealized</span>
-          <span class="{% if unrealized>=0 %}pos{% else %}neg{% endif %}" style="font-size:17px;font-weight:700;">
-            {% if unrealized>=0 %}+{% endif %}${{ "%.0f"|format(unrealized) }}
-          </span>
+  <div class="grid">
+    <div class="card">
+      <h2>{{ month }} Performance</h2>
+      {% if total >= 0 %}
+        <div class="pnl-big pos">+${{ "%.0f"|format(total) }}</div>
+      {% else %}
+        <div class="pnl-big neg">-${{ "%.0f"|format(total|abs) }}</div>
+      {% endif %}
+      <div class="stat-row"><span class="stat-label">Total Trades</span><span class="stat-val">{{ count }}</span></div>
+      <div class="stat-row"><span class="stat-label">Win Rate</span><span class="stat-val {% if win_rate >= 50 %}pos{% else %}neu{% endif %}">{{ win_rate }}%</span></div>
+      <div class="stat-row"><span class="stat-label">Wins / Losses</span><span class="stat-val"><span class="pos">{{ wins }}</span> / <span class="neg">{{ losses }}</span></span></div>
+      <div class="stat-row"><span class="stat-label">Best Trade</span><span class="stat-val pos">{% if best > 0 %}+${{ "%.0f"|format(best) }}{% else %}—{% endif %}</span></div>
+      <div class="stat-row"><span class="stat-label">Worst Trade</span><span class="stat-val neg">{% if worst < 0 %}-${{ "%.0f"|format(worst|abs) }}{% else %}—{% endif %}</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Active Position</h2>
+      {% if open_trade %}
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <div style="font-size:24px; font-weight:800;" class="{% if open_trade.action=='LONG' %}pos{% else %}neg{% endif %}">
+            {{ open_trade.action }}
+          </div>
+          <span class="badge badge-OPEN">RR {{ "%.2f"|format(open_trade.rr) }}</span>
         </div>
-      </div>
-      <div style="margin-top:14px;">
-        <form action="/close" method="post" onsubmit="return confirm('Close at market price?')">
-          <button type="submit" style="background:#3d1212;color:#e24b4a;border:1px solid #6b2222;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:12px;">Emergency Close</button>
+        
+        <div class="level-row"><span class="stat-label">Entry Price</span><span class="stat-val">{{ "%.2f"|format(open_trade.entry) }}</span></div>
+        <div class="level-row"><span class="stat-label">Stop Loss (Adj)</span><span class="stat-val neg">{{ "%.2f"|format(open_trade.sl) }}</span></div>
+        <div class="level-row"><span class="stat-label">Take Profit (Adj)</span><span class="stat-val pos">{{ "%.2f"|format(open_trade.tp1) }}</span></div>
+        
+        <div style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--border-color);">
+          <div class="level-row">
+            <span class="stat-label">Unrealized P&L</span>
+            <span class="stat-val {% if unrealized>=0 %}pos{% else %}neg{% endif %}" style="font-size:18px;">
+              {% if unrealized>=0 %}+{% endif %}${{ "%.0f"|format(unrealized) }}
+            </span>
+          </div>
+        </div>
+        
+        <form action="/close" method="post" onsubmit="return confirm('WARNING: Are you sure you want to close this position at current market price?')">
+          <button type="submit" class="btn-close">Emergency Close Position</button>
         </form>
+      {% else %}
+        <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:180px; text-align:center;">
+          <div style="font-size:32px; margin-bottom:12px; opacity:0.5;">⚖️</div>
+          <div style="font-size:18px; font-weight:700; color:var(--text-muted);">Flat Market</div>
+          <div style="font-size:13px; color:rgba(148, 163, 184, 0.6); margin-top:4px;">Waiting for TradingView signal</div>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>XAU/USD Market</h2>
+      {% if last_price %}
+        <div style="margin-bottom:16px;">
+          <span class="status-dot status-connected"></span>
+          <span style="font-size:12px; font-weight:600; color:var(--color-win);">OANDA Connected</span>
+        </div>
+        <div style="font-size:42px; font-weight:800; color:#fff; margin-bottom:16px; letter-spacing:-1px;">
+          {{ "%.2f"|format(last_price.mid) }}
+        </div>
+        <div class="level-row"><span class="stat-label">Ask (Buy)</span><span class="stat-val">{{ "%.2f"|format(last_price.ask) }}</span></div>
+        <div class="level-row"><span class="stat-label">Bid (Sell)</span><span class="stat-val">{{ "%.2f"|format(last_price.bid) }}</span></div>
+      {% else %}
+        <div style="margin-bottom:16px;">
+          <span class="status-dot status-error"></span>
+          <span style="font-size:12px; font-weight:600; color:var(--color-loss);">Disconnected</span>
+        </div>
+        <div style="color:var(--text-muted); font-size:13px; line-height:1.6;">
+          Waiting for API response.<br>Check Railway logs if this persists.
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="table-container">
+    <div class="table-header">Recent Trade History (Last 100)</div>
+    {% if trades %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>SL (Raw → Adj)</th>
+          <th>TP1 (Raw → Adj)</th>
+          <th>RR</th>
+          <th>Status</th>
+          <th>P&L</th>
+          <th>Date (UTC)</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for t in trades %}
+        <tr>
+          <td style="color:var(--text-muted);">#{{ t.id }}</td>
+          <td class="{% if t.action=='LONG' %}pos{% else %}neg{% endif %}" style="font-weight:700;">{{ t.action }}</td>
+          <td>{{ "%.2f"|format(t.entry) }}</td>
+          <td style="color:var(--color-loss); opacity:0.9;">{{ "%.2f"|format(t.sl_raw) }} <span style="color:var(--text-muted);">→</span> {{ "%.2f"|format(t.sl) }}</td>
+          <td style="color:var(--color-win); opacity:0.9;">{{ "%.2f"|format(t.tp1_raw) }} <span style="color:var(--text-muted);">→</span> {{ "%.2f"|format(t.tp1) }}</td>
+          <td style="color:var(--text-muted);">{{ "%.2f"|format(t.rr) }}</td>
+          <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+          <td class="{% if t.pnl>0 %}pos{% elif t.pnl<0 %}neg{% else %}neu{% endif %}" style="font-weight:800; font-size:15px;">
+            {% if t.status=='OPEN' %}—{% elif t.pnl>=0 %}+${{ "%.0f"|format(t.pnl) }}{% else %}-${{ "%.0f"|format(t.pnl|abs) }}{% endif %}
+          </td>
+          <td style="color:var(--text-muted); font-size:12px;">{{ t.opened_at[:16].replace('T', ' ') if t.opened_at else '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div style="padding: 40px; text-align: center; color: var(--text-muted); font-weight: 500;">
+        No trades registered yet. Waiting for webhook signals.
       </div>
-    {% else %}
-      <div style="color:#4a4e6a;font-size:16px;margin-top:10px;">— Flat —</div>
-      <div style="font-size:12px;color:#3a3e55;margin-top:8px;">Waiting for next signal</div>
     {% endif %}
   </div>
 
-  <div class="card" style="min-width:160px;">
-    <h2>XAU/USD</h2>
-    {% if last_price %}
-      <div style="font-size:11px;color:#1dce8a;margin-bottom:8px;">● OANDA connected</div>
-      <div style="font-size:26px;font-weight:700;color:#e8e9f0;margin-bottom:6px;">{{ "%.2f"|format(last_price.mid) }}</div>
-      <div style="font-size:12px;color:#6b6f8e;">Bid {{ "%.2f"|format(last_price.bid) }} | Ask {{ "%.2f"|format(last_price.ask) }}</div>
-    {% else %}
-      <div style="font-size:11px;color:#e24b4a;margin-bottom:8px;">● Not connected</div>
-      <div style="font-size:12px;color:#3a3e55;line-height:1.8;">Check Railway logs<br>for the error message</div>
-    {% endif %}
-  </div>
-
-</div>
-
-<div class="history">
-  <h3>Trade History (last 100)</h3>
-  {% if trades %}
-  <table>
-    <thead><tr>
-      <th>#</th><th>Dir</th><th>Entry</th>
-      <th>SL (raw → adj)</th><th>TP1 (raw → adj)</th>
-      <th>RR</th><th>Score</th><th>Status</th><th>P&L</th><th>Opened</th>
-    </tr></thead>
-    <tbody>
-    {% for t in trades %}
-    <tr>
-      <td style="color:#3a3e55;">{{ t.id }}</td>
-      <td class="{% if t.action=='LONG' %}long-dir{% else %}short-dir{% endif %}" style="font-weight:700;">{{ t.action }}</td>
-      <td>{{ "%.2f"|format(t.entry) }}</td>
-      <td style="color:#e24b4a;">{{ "%.2f"|format(t.sl_raw) }} → {{ "%.2f"|format(t.sl) }}</td>
-      <td style="color:#1dce8a;">{{ "%.2f"|format(t.tp1_raw) }} → {{ "%.2f"|format(t.tp1) }}</td>
-      <td style="color:#8890b0;">{{ "%.2f"|format(t.rr) }}</td>
-      <td style="color:#6b6f8e;">{{ t.score }}</td>
-      <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
-      <td class="{% if t.pnl>0 %}pos{% elif t.pnl<0 %}neg{% else %}neu{% endif %}" style="font-weight:700;">
-        {% if t.status=='OPEN' %}—{% elif t.pnl>=0 %}+${{ "%.0f"|format(t.pnl) }}{% else %}-${{ "%.0f"|format(t.pnl|abs) }}{% endif %}
-      </td>
-      <td style="color:#4a4e6a;font-size:12px;">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-    <div style="color:#3a3e55;padding:30px 0;">No trades yet. Waiting for TradingView signals.</div>
-  {% endif %}
 </div>
 </body>
 </html>
