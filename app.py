@@ -11,33 +11,29 @@ try:
     OANDA_OK = True
 except ImportError:
     OANDA_OK = False
+    print("[Startup] oandapyV20 not installed")
 
 app = Flask(__name__)
 
-# ── Config ─────────────────────────────────────────────────────────────
 OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")
 ACCOUNT_ID  = os.environ.get("ACCOUNT_ID",  "")
 INSTRUMENT  = "XAU_USD"
 LOT_SIZE    = float(os.environ.get("LOT_SIZE",  "0.5"))
-SLIPPAGE    = float(os.environ.get("SLIPPAGE",  "1.2"))   # points adjustment on TP + SL
-MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))   # minimum risk:reward to take trade
-OZ_FULL     = LOT_SIZE * 100                               # 0.5 lot = 50 oz
+SLIPPAGE    = float(os.environ.get("SLIPPAGE",  "1.2"))
+MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))
+OZ_FULL     = LOT_SIZE * 100
 DB_PATH     = "trades.db"
 
 lock       = threading.Lock()
 open_trade = None
 last_price = None
 
-# ── Slippage logic ─────────────────────────────────────────────────────
-# LONG:  TP adjusted DOWN 1.2pt (harder to reach), SL adjusted DOWN 1.2pt (easier to hit)
-# SHORT: TP adjusted UP   1.2pt (harder to reach), SL adjusted UP   1.2pt (easier to hit)
 def adjust_levels(action, tp1, sl):
     if action == "LONG":
         return tp1 - SLIPPAGE, sl - SLIPPAGE
     else:
         return tp1 + SLIPPAGE, sl + SLIPPAGE
 
-# ── RR check ───────────────────────────────────────────────────────────
 def calc_rr(action, entry, adj_tp1, adj_sl):
     if action == "LONG":
         reward = adj_tp1 - entry
@@ -49,13 +45,11 @@ def calc_rr(action, entry, adj_tp1, adj_sl):
         return 0.0
     return reward / risk
 
-# ── PnL helper ─────────────────────────────────────────────────────────
 def calc_pnl(action, entry, exit_price, oz):
     if action == "LONG":
         return (exit_price - entry) * oz
     return (entry - exit_price) * oz
 
-# ── Database ───────────────────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -82,58 +76,75 @@ def init_db():
         """)
         conn.commit()
 
-# ── Price monitor ──────────────────────────────────────────────────────
+# ── Price monitor — POLLS every 2 seconds (no streaming, works on Railway) ──
 def price_monitor():
     global open_trade, last_price
-    if not OANDA_OK or not OANDA_TOKEN:
-        print("[Monitor] OANDA not configured — add OANDA_TOKEN + ACCOUNT_ID env vars.")
+
+    if not OANDA_OK:
+        print("[Monitor] oandapyV20 not installed — price monitoring disabled.")
         return
+
+    if not OANDA_TOKEN or not ACCOUNT_ID:
+        print("[Monitor] OANDA_TOKEN or ACCOUNT_ID missing — add them in Railway Variables.")
+        return
+
+    print(f"[Monitor] Starting — account {ACCOUNT_ID[:8]}...")
     client = oandapyV20.API(access_token=OANDA_TOKEN, environment="practice")
+
     while True:
         try:
-            r = pricing.PricingStream(accountID=ACCOUNT_ID, params={"instruments": INSTRUMENT})
-            for tick in client.request(r):
-                if tick.get("type") != "PRICE":
-                    continue
-                bid = float(tick["bids"][0]["price"])
-                ask = float(tick["asks"][0]["price"])
-                mid = (bid + ask) / 2.0
-                with lock:
-                    last_price = {"bid": bid, "ask": ask, "mid": mid}
-                    if open_trade is None:
-                        continue
+            r = pricing.PricingInfo(
+                accountID=ACCOUNT_ID,
+                params={"instruments": INSTRUMENT}
+            )
+            client.request(r)
+            price_data = r.response["prices"][0]
+            bid = float(price_data["bids"][0]["price"])
+            ask = float(price_data["asks"][0]["price"])
+            mid = (bid + ask) / 2.0
+
+            with lock:
+                last_price = {"bid": bid, "ask": ask, "mid": mid}
+
+                if open_trade is not None:
                     t      = open_trade
                     action = t["action"]
-                    # For LONG:  TP hit when ask >= tp1, SL hit when bid <= sl
-                    # For SHORT: TP hit when bid <= tp1, SL hit when ask >= sl
+
                     if action == "LONG":
                         tp1_hit = ask >= t["tp1"]
                         sl_hit  = bid <= t["sl"]
                     else:
                         tp1_hit = bid <= t["tp1"]
                         sl_hit  = ask >= t["sl"]
+
                     now_str = datetime.now(timezone.utc).isoformat()
+
                     if tp1_hit:
                         pnl = round(calc_pnl(action, t["entry"], t["tp1"], OZ_FULL), 2)
                         with get_db() as conn:
-                            conn.execute("UPDATE trades SET status='WIN', pnl=?, closed_at=? WHERE id=?",
+                            conn.execute(
+                                "UPDATE trades SET status='WIN', pnl=?, closed_at=? WHERE id=?",
                                 (pnl, now_str, t["id"]))
                             conn.commit()
                         print(f"[Trade #{t['id']}] WIN  +${pnl:.2f}")
                         open_trade = None
+
                     elif sl_hit:
                         pnl = round(calc_pnl(action, t["entry"], t["sl"], OZ_FULL), 2)
                         with get_db() as conn:
-                            conn.execute("UPDATE trades SET status='LOSS', pnl=?, closed_at=? WHERE id=?",
+                            conn.execute(
+                                "UPDATE trades SET status='LOSS', pnl=?, closed_at=? WHERE id=?",
                                 (pnl, now_str, t["id"]))
                             conn.commit()
                         print(f"[Trade #{t['id']}] LOSS  ${pnl:.2f}")
                         open_trade = None
-        except Exception as e:
-            print(f"[Monitor] Error: {e} — reconnecting in 5s")
-            time.sleep(5)
 
-# ── Webhook ────────────────────────────────────────────────────────────
+            time.sleep(2)
+
+        except Exception as e:
+            print(f"[Monitor] Error: {e} — retrying in 10s")
+            time.sleep(10)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     global open_trade
@@ -148,9 +159,7 @@ def webhook():
         sl_raw  = float(data["sl"])
         tp1_raw = float(data["tp1"])
         score   = str(data.get("score", ""))
-        # Apply slippage to get realistic levels
         adj_tp1, adj_sl = adjust_levels(action, tp1_raw, sl_raw)
-        # RR filter
         rr = calc_rr(action, entry, adj_tp1, adj_sl)
         if rr < MIN_RR:
             print(f"[Signal] Skipped — RR {rr:.2f} < {MIN_RR}")
@@ -167,12 +176,11 @@ def webhook():
                 conn.commit()
             open_trade = {"id": trade_id, "action": action, "entry": entry,
                           "sl": adj_sl, "tp1": adj_tp1, "rr": round(rr, 2)}
-        print(f"[Trade #{trade_id}] {action} @ {entry}  SL:{adj_sl} (+{SLIPPAGE}pt adj)  TP1:{adj_tp1} (-{SLIPPAGE}pt adj)  RR:{rr:.2f}")
+        print(f"[Trade #{trade_id}] {action} @ {entry}  SL:{adj_sl}  TP1:{adj_tp1}  RR:{rr:.2f}")
         return jsonify({"status": "ok", "trade_id": trade_id, "rr": round(rr, 2)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ── Manual close ───────────────────────────────────────────────────────
 @app.route("/close", methods=["POST"])
 def manual_close():
     global open_trade
@@ -190,14 +198,13 @@ def manual_close():
         open_trade = None
     return jsonify({"status": "closed", "trade_id": trade_id, "pnl": pnl})
 
-# ── Dashboard ──────────────────────────────────────────────────────────
 DASHBOARD = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta http-equiv="refresh" content="15">
+<meta http-equiv="refresh" content="10">
 <title>Apex Paper Bot — {{ month }}</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
@@ -225,6 +232,8 @@ DASHBOARD = """
   .badge-MANUAL{background:#2a2a3a;color:#8890b0}
   .info-bar{font-size:11px;color:#3a3e55;padding:6px 20px}
   .tag{display:inline-block;background:#1a1d33;border:1px solid #2a2d45;border-radius:4px;padding:2px 8px;font-size:11px;color:#6b6f8e;margin-right:6px}
+  .dot-green{width:8px;height:8px;border-radius:50%;background:#1dce8a;display:inline-block;margin-right:5px}
+  .dot-red{width:8px;height:8px;border-radius:50%;background:#e24b4a;display:inline-block;margin-right:5px}
 </style>
 </head>
 <body>
@@ -234,10 +243,10 @@ DASHBOARD = """
 </div>
 <div class="info-bar">
   <span class="tag">100% exit @ TP1</span>
-  <span class="tag">{{ slippage }}pt slippage on SL + TP</span>
+  <span class="tag">{{ slippage }}pt slippage</span>
   <span class="tag">min {{ min_rr }}:1 RR</span>
-  <span class="tag">{{ lot_size }} lot = ${{ (lot_size * 100)|int }}/pt</span>
-  <span style="color:#2a2e45;">Auto-refreshes every 15s</span>
+  <span class="tag">{{ lot_size }} lot = ${{ (lot_size*100)|int }}/pt</span>
+  <span style="color:#2a2e45;">Auto-refreshes every 10s</span>
 </div>
 
 <div class="top">
@@ -265,8 +274,8 @@ DASHBOARD = """
         {{ open_trade.action }} &nbsp;<span style="font-size:13px;color:#6b6f8e;font-weight:400;">RR {{ "%.2f"|format(open_trade.rr) }}</span>
       </div>
       <div class="level-row"><span style="color:#6b6f8e;">Entry</span><span>{{ "%.2f"|format(open_trade.entry) }}</span></div>
-      <div class="level-row"><span style="color:#e24b4a;">Stop Loss <span style="font-size:11px;color:#4a4e6a;">(adj)</span></span><span>{{ "%.2f"|format(open_trade.sl) }}</span></div>
-      <div class="level-row"><span style="color:#1dce8a;">TP1 — 100% exit <span style="font-size:11px;color:#4a4e6a;">(adj)</span></span><span>{{ "%.2f"|format(open_trade.tp1) }}</span></div>
+      <div class="level-row"><span style="color:#e24b4a;">Stop Loss (adj)</span><span>{{ "%.2f"|format(open_trade.sl) }}</span></div>
+      <div class="level-row"><span style="color:#1dce8a;">TP1 — 100% exit (adj)</span><span>{{ "%.2f"|format(open_trade.tp1) }}</span></div>
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid #1e2140;">
         <div class="level-row">
           <span style="color:#6b6f8e;">Unrealized</span>
@@ -286,14 +295,27 @@ DASHBOARD = """
     {% endif %}
   </div>
 
-  <div class="card" style="min-width:160px;">
+  <div class="card" style="min-width:180px;">
     <h2>XAU/USD</h2>
     {% if last_price %}
+      <div style="display:flex;align-items:center;margin-bottom:6px;">
+        <span class="dot-green"></span>
+        <span style="font-size:11px;color:#1dce8a;">OANDA connected</span>
+      </div>
       <div style="font-size:26px;font-weight:700;color:#e8e9f0;margin-bottom:6px;">{{ "%.2f"|format(last_price.mid) }}</div>
       <div style="font-size:12px;color:#6b6f8e;">Bid {{ "%.2f"|format(last_price.bid) }} | Ask {{ "%.2f"|format(last_price.ask) }}</div>
     {% else %}
-      <div style="color:#3a3e55;margin-top:8px;">Connecting to OANDA...</div>
-      <div style="font-size:11px;color:#2a2e45;margin-top:6px;">Add OANDA_TOKEN + ACCOUNT_ID in Railway → Variables</div>
+      <div style="display:flex;align-items:center;margin-bottom:8px;">
+        <span class="dot-red"></span>
+        <span style="font-size:11px;color:#e24b4a;">Not connected</span>
+      </div>
+      <div style="font-size:12px;color:#3a3e55;line-height:1.6;">
+        Go to Railway<br>→ your project<br>→ Variables tab<br><br>
+        Add:<br>
+        <span style="color:#6b6f8e;">OANDA_TOKEN</span><br>
+        <span style="color:#6b6f8e;">ACCOUNT_ID</span><br><br>
+        Then click <span style="color:#7090ff;">Redeploy</span>
+      </div>
     {% endif %}
   </div>
 
@@ -371,6 +393,7 @@ def dashboard():
 def status():
     with lock:
         return jsonify({"open_trade": open_trade, "last_price": last_price,
+                        "oanda_connected": last_price is not None,
                         "config": {"slippage": SLIPPAGE, "min_rr": MIN_RR, "lot_size": LOT_SIZE}})
 
 init_db()
