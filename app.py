@@ -9,8 +9,12 @@ from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
-OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")
-ACCOUNT_ID  = os.environ.get("ACCOUNT_ID",  "")
+# --- KONFIGURACJA GŁÓWNA ---
+OANDA_TOKEN    = os.environ.get("OANDA_TOKEN", "")
+ACCOUNT_ID     = os.environ.get("ACCOUNT_ID",  "")
+OANDA_ENV      = os.environ.get("OANDA_ENV", "PRACTICE").upper()
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "ZMIEN_MNIE")
+
 INSTRUMENT  = "XAU_USD"
 SLIPPAGE    = float(os.environ.get("SLIPPAGE",  "1.2"))
 MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))
@@ -18,8 +22,13 @@ MAX_DIST    = float(os.environ.get("MAX_DIST",  "50.0"))
 DAILY_GOAL  = float(os.environ.get("DAILY_GOAL","500"))
 DB_PATH     = "trades.db"
 
-# Ustawienie kapitału startowego do paper-tradingu (ok. 350 PLN)
 STARTING_EQUITY = float(os.environ.get("STARTING_EQUITY", "90.0"))
+
+# Wybór serwera OANDA
+if OANDA_ENV == "LIVE":
+    OANDA_BASE_URL = "https://api-fxtrade.oanda.com"
+else:
+    OANDA_BASE_URL = "https://api-fxpractice.oanda.com"
 
 lock            = threading.Lock()
 open_trade      = None
@@ -33,7 +42,7 @@ session_low     =  float('inf')
 def get_price():
     headers = {"Authorization": f"Bearer {OANDA_TOKEN}"}
     r = requests.get(
-        f"https://api-fxpractice.oanda.com/v3/accounts/{ACCOUNT_ID}/pricing",
+        f"{OANDA_BASE_URL}/v3/accounts/{ACCOUNT_ID}/pricing",
         headers=headers, params={"instruments": INSTRUMENT}, timeout=10)
     r.raise_for_status()
     data = r.json()["prices"][0]
@@ -68,14 +77,10 @@ def init_db():
                 sl REAL NOT NULL, tp1 REAL NOT NULL,
                 rr REAL DEFAULT 0, score TEXT DEFAULT '',
                 status TEXT DEFAULT 'OPEN',
-                pnl REAL DEFAULT 0, opened_at TEXT, closed_at TEXT
+                pnl REAL DEFAULT 0, opened_at TEXT, closed_at TEXT,
+                lot_size REAL DEFAULT 0.01
             )
         """)
-        # Aktualizacja bazy o nową kolumnę dla dynamicznego lota (jeśli nie istnieje)
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN lot_size REAL DEFAULT 0.01")
-        except sqlite3.OperationalError:
-            pass
         conn.commit()
 
 # --- MODUŁ AUTO-SKALOWANIA ---
@@ -86,27 +91,17 @@ def get_virtual_equity():
     return STARTING_EQUITY + total_pnl
 
 def get_risk_profile(equity):
-    if equity <= 100.0:
-        return 10.0
-    elif equity >= 2500.0:
-        return 2.0
-    else:
-        # Liniowy zjazd z 10% na 2% pomiędzy 100$ a 2500$
-        return 10.0 - ((equity - 100.0) / 2400.0) * 8.0
+    if equity <= 100.0: return 10.0
+    elif equity >= 2500.0: return 2.0
+    else: return 10.0 - ((equity - 100.0) / 2400.0) * 8.0
 
 def calculate_position_size(entry, sl, equity):
-    sl_dist_pts = max(abs(entry - sl), 0.1) # Zabezpieczenie przed zerowym SL
+    sl_dist_pts = max(abs(entry - sl), 0.1)
     risk_pct = get_risk_profile(equity)
     risk_budget = equity * (risk_pct / 100.0)
-    
-    # Koszt 1 punktu SL dla 1 lota na złocie to 100 USD
     risk_per_1_lot = sl_dist_pts * 100.0
-    
-    calculated_lot = risk_budget / risk_per_1_lot
-    # Bezpieczne zaokrąglenie w dół do pełnych setnych (0.01)
-    final_lot = math.floor(calculated_lot * 100) / 100.0
-    
-    return max(0.01, final_lot)
+    calc_lot = risk_budget / risk_per_1_lot
+    return max(0.01, math.floor(calc_lot * 100) / 100.0)
 # -----------------------------
 
 def price_monitor():
@@ -130,8 +125,10 @@ def price_monitor():
                 if direction != "FLAT":
                     recent_ticks.insert(0, {"time": now_time_str, "price": mid, "direction": direction})
                     if len(recent_ticks) > 8: recent_ticks.pop()
+                    
+                # Lokalny monitor zamyka transakcję w bazie, gdy OANDA zamyka na serwerze
                 if open_trade is not None:
-                    t      = open_trade
+                    t = open_trade
                     action = t["action"]
                     tp1_hit = ask >= t["tp1"] if action == "LONG" else bid <= t["tp1"]
                     sl_hit  = bid <= t["sl"]  if action == "LONG" else ask >= t["sl"]
@@ -141,17 +138,12 @@ def price_monitor():
                         pnl    = round(calc_pnl(action, t["entry"], exit_p, t["lot_size"]), 2)
                         now_s  = datetime.now(timezone.utc).isoformat()
                         with get_db() as conn:
-                            conn.execute("UPDATE trades SET status=?, pnl=?, closed_at=? WHERE id=?",
-                                         (status, pnl, now_s, t["id"]))
+                            conn.execute("UPDATE trades SET status=?, pnl=?, closed_at=? WHERE id=?", (status, pnl, now_s, t["id"]))
                             conn.commit()
-                        print(f"[Trade #{t['id']}] {status}  ${pnl:.2f}")
+                        print(f"[Dashboard Sync] {status}  ${pnl:.2f}")
                         open_trade = None
             time.sleep(2)
-        except requests.exceptions.HTTPError as e:
-            print(f"[Monitor] HTTP error: {e.response.status_code}")
-            time.sleep(15)
         except Exception as e:
-            print(f"[Monitor] Error: {e}")
             time.sleep(10)
 
 
@@ -159,13 +151,19 @@ def price_monitor():
 def webhook():
     global open_trade
     try:
-        data   = request.get_json(force=True)
+        data = request.get_json(force=True)
+        
+        # 1. WERYFIKACJA BEZPIECZEŃSTWA
+        if data.get("secret") != WEBHOOK_SECRET:
+            print("[Security] Odrzucono nieautoryzowany sygnał!")
+            return jsonify({"error": "Unauthorized"}), 401
+            
         action = str(data.get("action", "")).upper()
         if action not in ("LONG", "SHORT"):
             return jsonify({"error": "invalid action"}), 400
             
         entry, sl_raw, tp1_raw = float(data["entry"]), float(data["sl"]), float(data["tp1"])
-        score  = str(data.get("score", ""))
+        score = str(data.get("score", ""))
         adj_tp1, adj_sl = adjust_levels(action, tp1_raw, sl_raw)
         rr = calc_rr(action, entry, adj_tp1, adj_sl)
 
@@ -183,10 +181,39 @@ def webhook():
             if open_trade is not None:
                 return jsonify({"status": "skipped", "reason": "already in trade"}), 200
             
-            # Auto-skalowanie wielkości pozycji
+            # 2. AUTO-SKALOWANIE
             current_equity = get_virtual_equity()
             trade_lot = calculate_position_size(entry, adj_sl, current_equity)
             
+            # 3. EGZEKUCJA ZLECENIA W OANDA (LIVE)
+            units = int(trade_lot * 100) # Na Oanda XAU_USD: 1 unit = 1 oz
+            if action == "SHORT": 
+                units = -units
+                
+            headers = {"Authorization": f"Bearer {OANDA_TOKEN}", "Content-Type": "application/json"}
+            order_payload = {
+                "order": {
+                    "type": "MARKET",
+                    "instrument": INSTRUMENT,
+                    "units": str(units),
+                    "timeInForce": "FOK",
+                    "positionFill": "DEFAULT",
+                    "stopLossOnFill": {"price": f"{adj_sl:.3f}"},
+                    "takeProfitOnFill": {"price": f"{adj_tp1:.3f}"}
+                }
+            }
+            
+            try:
+                r = requests.post(f"{OANDA_BASE_URL}/v3/accounts/{ACCOUNT_ID}/orders", headers=headers, json=order_payload)
+                r.raise_for_status()
+                oanda_resp = r.json()
+                print(f"[OANDA LIVE] Pozycja otwarta! Lot: {trade_lot} ({units} units)")
+            except requests.exceptions.HTTPError as err:
+                error_msg = err.response.text
+                print(f"[OANDA ERROR] Błąd egzekucji: {error_msg}")
+                return jsonify({"status": "error", "reason": f"OANDA API Error: {error_msg}"}), 500
+            
+            # 4. ZAPIS DO BAZY DANYCH (Jeśli Oanda przyjęła zlecenie)
             now_s = datetime.now(timezone.utc).isoformat()
             with get_db() as conn:
                 cur = conn.execute(
@@ -199,7 +226,6 @@ def webhook():
             open_trade = {"id": trade_id, "action": action, "entry": entry,
                           "sl": adj_sl, "tp1": adj_tp1, "rr": round(rr, 2), "lot_size": trade_lot}
                           
-        print(f"[Trade #{trade_id}] {action} @ {entry}  SL:{adj_sl}  LOT:{trade_lot}")
         return jsonify({"status": "ok", "trade_id": trade_id, "lot_size": trade_lot})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -210,12 +236,21 @@ def manual_close():
     global open_trade
     with lock:
         if open_trade is None: return jsonify({"status": "no open trade"}), 200
+        
+        # ZAMKNIĘCIE FIZYCZNEJ POZYCJI W OANDA
+        headers = {"Authorization": f"Bearer {OANDA_TOKEN}", "Content-Type": "application/json"}
+        close_payload = {"longUnits": "ALL"} if open_trade["action"] == "LONG" else {"shortUnits": "ALL"}
+        try:
+            requests.put(f"{OANDA_BASE_URL}/v3/accounts/{ACCOUNT_ID}/positions/{INSTRUMENT}/close", headers=headers, json=close_payload)
+            print("[OANDA LIVE] Awaryjne zamknięcie pozycji.")
+        except Exception as e:
+            print(f"[OANDA ERROR] Nie udało się zamknąć w Oanda: {e}")
+        
         price = last_price["mid"] if last_price else open_trade["entry"]
         pnl   = round(calc_pnl(open_trade["action"], open_trade["entry"], price, open_trade["lot_size"]), 2)
         now_s = datetime.now(timezone.utc).isoformat()
         with get_db() as conn:
-            conn.execute("UPDATE trades SET status='MANUAL', pnl=?, closed_at=? WHERE id=?",
-                         (pnl, now_s, open_trade["id"]))
+            conn.execute("UPDATE trades SET status='MANUAL', pnl=?, closed_at=? WHERE id=?", (pnl, now_s, open_trade["id"]))
             conn.commit()
         open_trade = None
     return jsonify({"status": "closed"})
@@ -237,7 +272,7 @@ DASHBOARD = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Apex Paper Bot | Command Center</title>
+<title>Apex Live Bot | Command Center</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -256,6 +291,8 @@ DASHBOARD = """<!DOCTYPE html>
   .hdr p{color:var(--muted);font-size:13px;margin-top:4px}
   .tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .tag{background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;color:var(--muted)}
+  .env-badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1px;animation:glow 2s infinite alternate;}
+  @keyframes glow{from{box-shadow:0 0 5px currentColor}to{box-shadow:0 0 15px currentColor}}
   .card{background:var(--bg-card);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 10px 30px -10px rgba(0,0,0,0.5)}
   .card h2{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;font-weight:700}
   .top-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:20px}
@@ -275,7 +312,6 @@ DASHBOARD = """<!DOCTYPE html>
   .flash-down{color:var(--loss)!important;text-shadow:0 0 15px rgba(244,63,94,0.4)}
   .btn-close{width:100%;background:var(--loss-bg);color:var(--loss);border:1px solid rgba(244,63,94,0.3);padding:12px;border-radius:8px;font-weight:700;cursor:pointer;transition:all 0.2s;margin-top:16px}
   .btn-close:hover{background:var(--loss);color:#fff}
-  /* Toggle button */
   .btn-toggle{padding:8px 18px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;transition:all 0.2s;border:none;letter-spacing:0.3px}
   .btn-toggle-on{background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3)}
   .btn-toggle-on:hover{background:#10b981;color:#fff}
@@ -317,11 +353,13 @@ DASHBOARD = """<!DOCTYPE html>
       <p>{{ month }} &mdash; Real-Time Command Center</p>
     </div>
     <div class="tags">
-      <span class="tag" style="background:rgba(16,185,129,0.1); border-color:#10b981; color:#10b981;">
-        Equity: ${{ "%.2f"|format(equity) }}
-      </span>
+      {% if oanda_env == 'LIVE' %}
+        <span class="env-badge" style="background:rgba(16,185,129,0.2); color:#10b981; border:1px solid #10b981;">● OANDA LIVE</span>
+      {% else %}
+        <span class="env-badge" style="background:rgba(240,152,32,0.2); color:#f09820; border:1px solid #f09820;">● PRACTICE MODE</span>
+      {% endif %}
+      <span class="tag" style="background:rgba(16,185,129,0.1); border-color:#10b981; color:#10b981;">Equity: ${{ "%.2f"|format(equity) }}</span>
       <span class="tag">Risk: {{ "%.1f"|format(risk_pct) }}%</span>
-      <span class="tag">Max {{ max_dist }}pt Dist</span>
       <div id="toggle-wrap" style="display:flex;align-items:center;gap:10px;margin-left:8px">
         <div class="toggle-status">
           <span class="dot-pulse" id="trading-dot"></span>
@@ -333,7 +371,6 @@ DASHBOARD = """<!DOCTYPE html>
   </div>
 
   <div class="top-grid">
-
     <div class="card">
       <h2>{{ month }} Performance</h2>
       {% if total >= 0 %}
@@ -512,7 +549,6 @@ DASHBOARD = """<!DOCTYPE html>
         const isLong = t.action === 'LONG';
         if (activeId !== t.id && activeId !== null) window.location.reload();
         activeId = t.id;
-        // Obliczenia używają teraz t.lot_size pobranego prosto z bazy
         const currentLot = t.lot_size ? t.lot_size : 0.01;
         const pnl  = isLong ? (p - t.entry)*(currentLot*100) : (t.entry - p)*(currentLot*100);
         const cls  = pnl >= 0 ? 'pos' : 'neg';
@@ -543,7 +579,7 @@ DASHBOARD = """<!DOCTYPE html>
   }
 
   function closeT() {
-    if (confirm('Close position at current market price?')) {
+    if (confirm('Zamknąć fizyczną pozycję na OANDA?')) {
       fetch('/close',{method:'POST'}).then(()=>window.location.reload());
     }
   }
@@ -562,11 +598,8 @@ def dashboard():
     today_start = f"{now.year}-{now.month:02d}-{now.day:02d}"
 
     with get_db() as conn:
-        month_rows = conn.execute(
-            "SELECT * FROM trades WHERE status != 'OPEN' AND opened_at >= ? ORDER BY opened_at DESC",
-            (month_start,)).fetchall()
-        all_rows = conn.execute(
-            "SELECT * FROM trades ORDER BY opened_at DESC LIMIT 50").fetchall()
+        month_rows = conn.execute("SELECT * FROM trades WHERE status != 'OPEN' AND opened_at >= ? ORDER BY opened_at DESC", (month_start,)).fetchall()
+        all_rows = conn.execute("SELECT * FROM trades ORDER BY opened_at DESC LIMIT 50").fetchall()
 
     closed = [dict(r) for r in month_rows]
     all_t  = [dict(r) for r in all_rows]
@@ -605,9 +638,8 @@ def dashboard():
         month=now.strftime("%b %Y"), total=total, wins=wins, losses=losses,
         count=count, win_rate=wr, best=best, trades=all_t,
         avg_win=avg_win, avg_loss=avg_loss, pf=pf, streak=streak,
-        min_rr=MIN_RR, max_dist=MAX_DIST,
-        daily_pnl=daily_pnl, daily_goal=DAILY_GOAL, target_pct=target_pct,
-        equity=current_equity, risk_pct=current_risk)
+        min_rr=MIN_RR, max_dist=MAX_DIST, daily_pnl=daily_pnl, daily_goal=DAILY_GOAL, target_pct=target_pct,
+        equity=current_equity, risk_pct=current_risk, oanda_env=OANDA_ENV)
 
 
 @app.route("/status")
@@ -623,7 +655,6 @@ def status():
             "open_trade":      open_trade,
             "trading_enabled": trading_enabled
         })
-
 
 init_db()
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
