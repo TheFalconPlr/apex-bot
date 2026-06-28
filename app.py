@@ -3,6 +3,7 @@ import sqlite3
 import threading
 import time
 import requests
+import math
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template_string
 
@@ -11,13 +12,14 @@ app = Flask(__name__)
 OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")
 ACCOUNT_ID  = os.environ.get("ACCOUNT_ID",  "")
 INSTRUMENT  = "XAU_USD"
-LOT_SIZE    = float(os.environ.get("LOT_SIZE",  "0.5"))
 SLIPPAGE    = float(os.environ.get("SLIPPAGE",  "1.2"))
 MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))
-MAX_DIST    = float(os.environ.get("MAX_DIST",  "50.0")) # Maksymalny dozwolony dystans do TP1 i SL
+MAX_DIST    = float(os.environ.get("MAX_DIST",  "50.0"))
 DAILY_GOAL  = float(os.environ.get("DAILY_GOAL","500"))
-OZ_FULL     = LOT_SIZE * 100
 DB_PATH     = "trades.db"
+
+# Ustawienie kapitału startowego do paper-tradingu (ok. 350 PLN)
+STARTING_EQUITY = float(os.environ.get("STARTING_EQUITY", "90.0"))
 
 lock            = threading.Lock()
 open_trade      = None
@@ -46,7 +48,8 @@ def calc_rr(action, entry, adj_tp1, adj_sl):
     else:                reward, risk = entry - adj_tp1, adj_sl - entry
     return (reward / risk) if risk > 0 else 0.0
 
-def calc_pnl(action, entry, exit_price, oz):
+def calc_pnl(action, entry, exit_price, lot_size):
+    oz = lot_size * 100.0
     if action == "LONG": return (exit_price - entry) * oz
     return (entry - exit_price) * oz
 
@@ -68,7 +71,43 @@ def init_db():
                 pnl REAL DEFAULT 0, opened_at TEXT, closed_at TEXT
             )
         """)
+        # Aktualizacja bazy o nową kolumnę dla dynamicznego lota (jeśli nie istnieje)
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN lot_size REAL DEFAULT 0.01")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
+
+# --- MODUŁ AUTO-SKALOWANIA ---
+def get_virtual_equity():
+    with get_db() as conn:
+        row = conn.execute("SELECT SUM(pnl) as total_pnl FROM trades WHERE status != 'OPEN'").fetchone()
+        total_pnl = row["total_pnl"] if row["total_pnl"] else 0.0
+    return STARTING_EQUITY + total_pnl
+
+def get_risk_profile(equity):
+    if equity <= 100.0:
+        return 10.0
+    elif equity >= 2500.0:
+        return 2.0
+    else:
+        # Liniowy zjazd z 10% na 2% pomiędzy 100$ a 2500$
+        return 10.0 - ((equity - 100.0) / 2400.0) * 8.0
+
+def calculate_position_size(entry, sl, equity):
+    sl_dist_pts = max(abs(entry - sl), 0.1) # Zabezpieczenie przed zerowym SL
+    risk_pct = get_risk_profile(equity)
+    risk_budget = equity * (risk_pct / 100.0)
+    
+    # Koszt 1 punktu SL dla 1 lota na złocie to 100 USD
+    risk_per_1_lot = sl_dist_pts * 100.0
+    
+    calculated_lot = risk_budget / risk_per_1_lot
+    # Bezpieczne zaokrąglenie w dół do pełnych setnych (0.01)
+    final_lot = math.floor(calculated_lot * 100) / 100.0
+    
+    return max(0.01, final_lot)
+# -----------------------------
 
 def price_monitor():
     global open_trade, last_price, recent_ticks, session_high, session_low
@@ -99,7 +138,7 @@ def price_monitor():
                     if tp1_hit or sl_hit:
                         exit_p = t["tp1"] if tp1_hit else t["sl"]
                         status = "WIN" if tp1_hit else "LOSS"
-                        pnl    = round(calc_pnl(action, t["entry"], exit_p, OZ_FULL), 2)
+                        pnl    = round(calc_pnl(action, t["entry"], exit_p, t["lot_size"]), 2)
                         now_s  = datetime.now(timezone.utc).isoformat()
                         with get_db() as conn:
                             conn.execute("UPDATE trades SET status=?, pnl=?, closed_at=? WHERE id=?",
@@ -143,18 +182,25 @@ def webhook():
         with lock:
             if open_trade is not None:
                 return jsonify({"status": "skipped", "reason": "already in trade"}), 200
+            
+            # Auto-skalowanie wielkości pozycji
+            current_equity = get_virtual_equity()
+            trade_lot = calculate_position_size(entry, adj_sl, current_equity)
+            
             now_s = datetime.now(timezone.utc).isoformat()
             with get_db() as conn:
                 cur = conn.execute(
-                    "INSERT INTO trades (action,entry,sl_raw,tp1_raw,sl,tp1,rr,score,status,opened_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,'OPEN',?)",
-                    (action, entry, sl_raw, tp1_raw, adj_sl, adj_tp1, round(rr, 2), score, now_s))
+                    "INSERT INTO trades (action,entry,sl_raw,tp1_raw,sl,tp1,rr,score,status,opened_at,lot_size)"
+                    " VALUES (?,?,?,?,?,?,?,?,'OPEN',?,?)",
+                    (action, entry, sl_raw, tp1_raw, adj_sl, adj_tp1, round(rr, 2), score, now_s, trade_lot))
                 trade_id = cur.lastrowid
                 conn.commit()
+                
             open_trade = {"id": trade_id, "action": action, "entry": entry,
-                          "sl": adj_sl, "tp1": adj_tp1, "rr": round(rr, 2)}
-        print(f"[Trade #{trade_id}] {action} @ {entry}  SL:{adj_sl}  TP1:{adj_tp1}  RR:{rr:.2f}")
-        return jsonify({"status": "ok", "trade_id": trade_id})
+                          "sl": adj_sl, "tp1": adj_tp1, "rr": round(rr, 2), "lot_size": trade_lot}
+                          
+        print(f"[Trade #{trade_id}] {action} @ {entry}  SL:{adj_sl}  LOT:{trade_lot}")
+        return jsonify({"status": "ok", "trade_id": trade_id, "lot_size": trade_lot})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -165,7 +211,7 @@ def manual_close():
     with lock:
         if open_trade is None: return jsonify({"status": "no open trade"}), 200
         price = last_price["mid"] if last_price else open_trade["entry"]
-        pnl   = round(calc_pnl(open_trade["action"], open_trade["entry"], price, OZ_FULL), 2)
+        pnl   = round(calc_pnl(open_trade["action"], open_trade["entry"], price, open_trade["lot_size"]), 2)
         now_s = datetime.now(timezone.utc).isoformat()
         with get_db() as conn:
             conn.execute("UPDATE trades SET status='MANUAL', pnl=?, closed_at=? WHERE id=?",
@@ -271,10 +317,11 @@ DASHBOARD = """<!DOCTYPE html>
       <p>{{ month }} &mdash; Real-Time Command Center</p>
     </div>
     <div class="tags">
-      <span class="tag">{{ lot_size }} Lot = ${{ (lot_size*100)|int }}/pt</span>
-      <span class="tag">100% Exit at TP1</span>
+      <span class="tag" style="background:rgba(16,185,129,0.1); border-color:#10b981; color:#10b981;">
+        Equity: ${{ "%.2f"|format(equity) }}
+      </span>
+      <span class="tag">Risk: {{ "%.1f"|format(risk_pct) }}%</span>
       <span class="tag">Max {{ max_dist }}pt Dist</span>
-      <span class="tag">Min {{ min_rr }}:1 RR</span>
       <div id="toggle-wrap" style="display:flex;align-items:center;gap:10px;margin-left:8px">
         <div class="toggle-status">
           <span class="dot-pulse" id="trading-dot"></span>
@@ -366,8 +413,8 @@ DASHBOARD = """<!DOCTYPE html>
     {% if trades %}
     <table>
       <thead><tr>
-        <th>#</th><th>Side</th><th>Entry</th><th>SL (adj)</th><th>TP1 (adj)</th>
-        <th>RR</th><th>Score</th><th>Status</th><th>P&amp;L</th><th>Date (UTC)</th>
+        <th>#</th><th>Side</th><th>Entry</th><th>SL</th><th>TP1</th>
+        <th>Lot</th><th>RR</th><th>Status</th><th>P&amp;L</th><th>Date (UTC)</th>
       </tr></thead>
       <tbody>
       {% for t in trades %}
@@ -377,8 +424,8 @@ DASHBOARD = """<!DOCTYPE html>
           <td>{{ "%.2f"|format(t.entry) }}</td>
           <td style="color:var(--loss)">{{ "%.2f"|format(t.sl) }}</td>
           <td style="color:var(--win)">{{ "%.2f"|format(t.tp1) }}</td>
+          <td style="color:var(--open)">{{ "%.2f"|format(t.lot_size if t.lot_size else 0.0) }}</td>
           <td style="color:var(--muted)">{{ "%.2f"|format(t.rr) }}</td>
-          <td style="color:var(--muted)">{{ t.score }}</td>
           <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
           <td class="{% if t.pnl>0 %}pos{% elif t.pnl<0 %}neg{% else %}neu{% endif %}" style="font-weight:800">
             {% if t.status=='OPEN' %}&mdash;{% elif t.pnl>=0 %}+${{ "%.0f"|format(t.pnl) }}{% else %}-${{ "%.0f"|format(t.pnl|abs) }}{% endif %}
@@ -396,7 +443,6 @@ DASHBOARD = """<!DOCTYPE html>
 
 <script>
   let prevPrice = 0, activeId = null;
-  const lotSize = {{ lot_size }};
 
   function updateToggleUI(enabled) {
     const dot = document.getElementById('trading-dot');
@@ -466,7 +512,9 @@ DASHBOARD = """<!DOCTYPE html>
         const isLong = t.action === 'LONG';
         if (activeId !== t.id && activeId !== null) window.location.reload();
         activeId = t.id;
-        const pnl  = isLong ? (p - t.entry)*(lotSize*100) : (t.entry - p)*(lotSize*100);
+        // Obliczenia używają teraz t.lot_size pobranego prosto z bazy
+        const currentLot = t.lot_size ? t.lot_size : 0.01;
+        const pnl  = isLong ? (p - t.entry)*(currentLot*100) : (t.entry - p)*(currentLot*100);
         const cls  = pnl >= 0 ? 'pos' : 'neg';
         const sign = pnl >= 0 ? '+' : '';
         const range = Math.abs(t.tp1 - t.sl);
@@ -483,7 +531,7 @@ DASHBOARD = """<!DOCTYPE html>
             <div class="danger-fill"></div>
             <div class="danger-marker" style="left:${pct}%"></div>
           </div>
-          <div class="sr"><span class="sk">Entry</span><span class="sv">${t.entry.toFixed(2)}</span></div>
+          <div class="sr"><span class="sk">Entry (Size)</span><span class="sv">${t.entry.toFixed(2)} <span style="color:var(--open)">(${currentLot.toFixed(2)} Lot)</span></span></div>
           <div class="sr"><span class="sk">Unrealized P&L</span><span class="sv ${cls}" style="font-size:18px">${sign}$${pnl.toFixed(2)}</span></div>
           <button class="btn-close" onclick="closeT()">Emergency Close</button>
         `;
@@ -549,14 +597,17 @@ def dashboard():
     today_rows = [t for t in closed if t.get("closed_at") and t["closed_at"] >= today_start]
     daily_pnl  = sum(t["pnl"] for t in today_rows)
     target_pct = min(100, max(0, (daily_pnl / DAILY_GOAL) * 100)) if DAILY_GOAL > 0 else 0
+    
+    current_equity = get_virtual_equity()
+    current_risk   = get_risk_profile(current_equity)
 
     return render_template_string(DASHBOARD,
         month=now.strftime("%b %Y"), total=total, wins=wins, losses=losses,
         count=count, win_rate=wr, best=best, trades=all_t,
         avg_win=avg_win, avg_loss=avg_loss, pf=pf, streak=streak,
-        lot_size=LOT_SIZE, slippage=SLIPPAGE, min_rr=MIN_RR,
+        min_rr=MIN_RR, max_dist=MAX_DIST,
         daily_pnl=daily_pnl, daily_goal=DAILY_GOAL, target_pct=target_pct,
-        max_dist=MAX_DIST)
+        equity=current_equity, risk_pct=current_risk)
 
 
 @app.route("/status")
