@@ -25,7 +25,6 @@ def init_db():
                 ticket INTEGER DEFAULT 0
             )
         """)
-        # Tabela stanu konta synchronizowana z MT5
         conn.execute("""
             CREATE TABLE IF NOT EXISTS account_sync (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -36,7 +35,10 @@ def init_db():
         conn.execute("INSERT OR IGNORE INTO account_sync (id, equity) VALUES (1, 0)")
         conn.commit()
 
-# --- TRADINGVIEW WEBHOOK (Odbiór sygnału) ---
+# WYMUSZENIE STARTU BAZY DANYCH DLA SERWERÓW CLOUD (Naprawia Błąd 500)
+init_db()
+
+# --- TRADINGVIEW WEBHOOK (Odbiór sygnału z wykresu) ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -48,9 +50,9 @@ def webhook():
         
         with lock:
             with get_db() as conn:
-                # Zamknij stare oczekujące
+                # Anuluj stare, niewykonane sygnały
                 conn.execute("UPDATE trades SET status='CANCELED' WHERE status='PENDING'")
-                # Dodaj nowy sygnał
+                # Zapisz nowy sygnał
                 conn.execute("INSERT INTO trades (action, entry, sl, tp1, status) VALUES (?,?,?,?,'PENDING')",
                              (action, entry, sl, tp1))
                 conn.commit()
@@ -58,7 +60,7 @@ def webhook():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- MT5 ENGINE API (Komunikacja z lokalnym skryptem) ---
+# --- MT5 ENGINE API (Komunikacja z lokalnym Pythonem na PC) ---
 @app.route("/api/pending", methods=["GET"])
 def get_pending():
     secret = request.args.get("secret")
@@ -69,7 +71,6 @@ def get_pending():
 
 @app.route("/api/sync", methods=["POST"])
 def sync_data():
-    # Lokalny MT5 wysyła tu raporty: stan konta i aktualizacje transakcji
     secret = request.json.get("secret")
     if secret != WEBHOOK_SECRET: return jsonify({"error": "Unauthorized"}), 401
     
@@ -78,11 +79,11 @@ def sync_data():
     
     with lock:
         with get_db() as conn:
-            # Sync konta
+            # Sync parametrów konta (Saldo z MT5)
             if "equity" in payload:
                 conn.execute("UPDATE account_sync SET equity=?, margin=?, risk_pct=?, last_sync=? WHERE id=1",
                              (payload["equity"], payload["margin"], payload["risk_pct"], now_s))
-            # Aktualizacja pojedynczego trade'u
+            # Aktualizacja statusu transakcji po zrealizowaniu przez MT5
             if "trade_update" in payload:
                 tu = payload["trade_update"]
                 conn.execute("""
@@ -93,7 +94,7 @@ def sync_data():
             conn.commit()
     return jsonify({"status": "synced"})
 
-# --- DASHBOARD (Bloomberg Style) ---
+# --- DASHBOARD UI ---
 DASHBOARD = """
 <!DOCTYPE html>
 <html lang="en">
@@ -117,6 +118,8 @@ DASHBOARD = """
   .badge-WIN { background:rgba(0, 210, 106, 0.1); color:var(--win); }
   .badge-LOSS { background:rgba(249, 47, 96, 0.1); color:var(--loss); }
   .badge-BE { background:rgba(142, 142, 147, 0.1); color:var(--be); }
+  .badge-PENDING { background:rgba(255, 255, 255, 0.1); color:#fff; }
+  .badge-CANCELED { background:rgba(255, 255, 255, 0.05); color:#666; }
   .pulse { display:inline-block; width:8px; height:8px; background:var(--win); border-radius:50%; box-shadow:0 0 10px var(--win); margin-right:8px; animation:blink 2s infinite; }
   @keyframes blink { 50% { opacity:0.3; } }
 </style>
@@ -151,7 +154,7 @@ DASHBOARD = """
         <td class="{{ 'pos' if t.pnl>0 else 'neg' if t.pnl<0 else 'neu' }}" style="font-weight:800">
             {{ "+$" if t.pnl>0 else "-$" if t.pnl<0 else "$" }}{{ "%.2f"|format(t.pnl|abs) }}
         </td>
-        <td class="neu">{{ t.opened_at }}</td>
+        <td class="neu">{{ t.opened_at if t.opened_at else '---' }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -164,7 +167,7 @@ DASHBOARD = """
 def index():
     with get_db() as conn:
         acc = conn.execute("SELECT * FROM account_sync WHERE id=1").fetchone()
-        trades = conn.execute("SELECT * FROM trades WHERE status != 'PENDING' ORDER BY id DESC LIMIT 20").fetchall()
+        trades = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 20").fetchall()
         
         wins = sum(1 for t in trades if t["status"] == "WIN")
         losses = sum(1 for t in trades if t["status"] == "LOSS")
@@ -173,5 +176,4 @@ def index():
     return render_template_string(DASHBOARD, acc=acc, trades=trades, wins=wins, losses=losses, bes=bes)
 
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
