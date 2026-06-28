@@ -14,6 +14,7 @@ INSTRUMENT  = "XAU_USD"
 LOT_SIZE    = float(os.environ.get("LOT_SIZE",  "0.5"))
 SLIPPAGE    = float(os.environ.get("SLIPPAGE",  "1.2"))
 MIN_RR      = float(os.environ.get("MIN_RR",    "1.0"))
+MAX_DIST    = float(os.environ.get("MAX_DIST",  "50.0")) # Maksymalny dozwolony dystans do TP1 i SL
 DAILY_GOAL  = float(os.environ.get("DAILY_GOAL","500"))
 OZ_FULL     = LOT_SIZE * 100
 DB_PATH     = "trades.db"
@@ -123,15 +124,21 @@ def webhook():
         action = str(data.get("action", "")).upper()
         if action not in ("LONG", "SHORT"):
             return jsonify({"error": "invalid action"}), 400
+            
         entry, sl_raw, tp1_raw = float(data["entry"]), float(data["sl"]), float(data["tp1"])
         score  = str(data.get("score", ""))
         adj_tp1, adj_sl = adjust_levels(action, tp1_raw, sl_raw)
         rr = calc_rr(action, entry, adj_tp1, adj_sl)
 
+        risk_dist = abs(entry - sl_raw)
+        reward_dist = abs(tp1_raw - entry)
+
         if not trading_enabled:
             return jsonify({"status": "skipped", "reason": "trading disabled"}), 200
         if rr < MIN_RR:
             return jsonify({"status": "skipped", "reason": f"RR {rr:.2f} too low"}), 200
+        if risk_dist > MAX_DIST or reward_dist > MAX_DIST:
+            return jsonify({"status": "skipped", "reason": f"Distance > {MAX_DIST} pts limit"}), 200
 
         with lock:
             if open_trade is not None:
@@ -265,7 +272,8 @@ DASHBOARD = """<!DOCTYPE html>
     </div>
     <div class="tags">
       <span class="tag">{{ lot_size }} Lot = ${{ (lot_size*100)|int }}/pt</span>
-      <span class="tag">{{ slippage }}pt Slippage</span>
+      <span class="tag">100% Exit at TP1</span>
+      <span class="tag">Max {{ max_dist }}pt Dist</span>
       <span class="tag">Min {{ min_rr }}:1 RR</span>
       <div id="toggle-wrap" style="display:flex;align-items:center;gap:10px;margin-left:8px">
         <div class="toggle-status">
@@ -469,7 +477,7 @@ DASHBOARD = """<!DOCTYPE html>
             <span class="badge badge-OPEN">RR ${t.rr}</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:11px;color:#94a3b8">
-            <span>SL: ${t.sl.toFixed(2)}</span><span>TP: ${t.tp1.toFixed(2)}</span>
+            <span>SL: ${t.sl.toFixed(2)}</span><span>TP1: ${t.tp1.toFixed(2)}</span>
           </div>
           <div class="danger-wrap">
             <div class="danger-fill"></div>
@@ -522,7 +530,6 @@ def dashboard():
     wr     = round(wins / count * 100) if count > 0 else 0
     best   = max((t["pnl"] for t in closed), default=0)
 
-    # Stats upgrade
     win_trades  = [t for t in closed if t["status"] == "WIN"]
     loss_trades = [t for t in closed if t["status"] == "LOSS"]
     avg_win   = round(sum(t["pnl"] for t in win_trades)  / len(win_trades),  2) if win_trades  else 0
@@ -539,7 +546,6 @@ def dashboard():
                 if t["status"] == ref: streak += 1 if ref == "WIN" else -1
                 else: break
 
-    # Daily target
     today_rows = [t for t in closed if t.get("closed_at") and t["closed_at"] >= today_start]
     daily_pnl  = sum(t["pnl"] for t in today_rows)
     target_pct = min(100, max(0, (daily_pnl / DAILY_GOAL) * 100)) if DAILY_GOAL > 0 else 0
@@ -549,7 +555,8 @@ def dashboard():
         count=count, win_rate=wr, best=best, trades=all_t,
         avg_win=avg_win, avg_loss=avg_loss, pf=pf, streak=streak,
         lot_size=LOT_SIZE, slippage=SLIPPAGE, min_rr=MIN_RR,
-        daily_pnl=daily_pnl, daily_goal=DAILY_GOAL, target_pct=target_pct)
+        daily_pnl=daily_pnl, daily_goal=DAILY_GOAL, target_pct=target_pct,
+        max_dist=MAX_DIST)
 
 
 @app.route("/status")
