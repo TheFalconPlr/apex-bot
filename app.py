@@ -165,7 +165,10 @@ def toggle(target):
     with lock:
         with get_db() as conn:
             curr = conn.execute(f"SELECT {col} FROM settings WHERE id=1").fetchone()[col]
-            new_val = "LIVE" if curr == "DEMO" else ("DEMO" if curr == "LIVE" else (1 if curr == 0 else 0))
+            if target == "mode":
+                new_val = "LIVE" if curr == "DEMO" else "DEMO"
+            else:
+                new_val = 1 if curr == 0 else 0
             conn.execute(f"UPDATE settings SET {col}=? WHERE id=1", (new_val,))
             conn.commit()
     return jsonify({"status": "ok", "new_val": new_val})
@@ -209,11 +212,10 @@ DASHBOARD = """
 </head>
 <body class="min-h-screen p-3 md:p-6 lg:p-8 flex flex-col gap-4">
 
-    <!-- HEADER -->
     <header class="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 premium-card p-4">
         <div class="flex items-center gap-4">
             <div class="w-12 h-12 rounded-xl bg-zinc-800 flex items-center justify-center border border-white/10 shadow-lg">
-                <i class="fa-solid fa-terminal text-xl text-zinc-300"></i>
+                <i class="fa-solid fa-layer-group text-xl text-zinc-300"></i>
             </div>
             <div>
                 <h1 class="text-xl md:text-2xl font-bold tracking-tight">Apex <span class="font-light text-zinc-400">Quant</span></h1>
@@ -223,14 +225,12 @@ DASHBOARD = """
             </div>
         </div>
         
-        <!-- ZEGARY -->
         <div class="hidden xl:flex gap-6 border-l border-white/10 pl-6">
             <div class="flex flex-col"><span class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider">London</span><span class="mono text-sm" id="clock-ldn">--:--</span></div>
             <div class="flex flex-col"><span class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider">New York</span><span class="mono text-sm" id="clock-ny">--:--</span></div>
             <div class="flex flex-col"><span class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider">Tokyo</span><span class="mono text-sm" id="clock-tok">--:--</span></div>
         </div>
 
-        <!-- TOGGLES -->
         <div class="flex items-center gap-6 bg-black/30 p-2.5 rounded-xl border border-white/5 w-full xl:w-auto justify-between xl:justify-end">
             <div class="flex flex-col items-center">
                 <span class="text-[8px] text-zinc-500 font-bold uppercase mb-1" id="mode-txt">DEMO ACCOUNT</span>
@@ -249,23 +249,17 @@ DASHBOARD = """
         </div>
     </header>
 
-    <!-- MACRO RADAR -->
     <div class="premium-card p-4 border border-blue-500/30 bg-blue-900/10 flex justify-between items-center relative overflow-hidden">
         <div class="absolute inset-0 bg-gradient-to-r from-blue-500/10 to-transparent pointer-events-none"></div>
         <div class="flex items-center gap-4 relative z-10">
             <i class="fa-solid fa-earth-americas text-blue-400 text-3xl animate-pulse drop-shadow-[0_0_15px_rgba(59,130,246,0.8)]"></i>
             <div>
                 <h3 class="text-[10px] text-blue-400 font-bold uppercase tracking-widest drop-shadow-md">Macroeconomic Radar Active (Clear)</h3>
-                <p class="text-zinc-100 font-semibold mt-1">Fed Chairman Warsh Speaks</p>
+                <p class="text-zinc-100 font-semibold mt-1">Awaiting Data Events</p>
             </div>
-        </div>
-        <div class="text-right relative z-10">
-            <h3 class="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Time to Event (UTC)</h3>
-            <p class="text-blue-400 font-mono text-xl md:text-2xl font-bold tracking-tight">43:50:37</p>
         </div>
     </div>
     
-    <!-- FTMO GUARDIAN -->
     <div class="premium-card p-4 relative overflow-hidden border-t border-t-indigo-500/50">
         <div class="flex justify-between items-center mb-2">
             <h3 class="text-[10px] text-zinc-400 font-bold uppercase flex items-center gap-2"><i class="fa-solid fa-shield-halved text-indigo-400"></i> FTMO Guardian (Daily DD)</h3>
@@ -277,15 +271,13 @@ DASHBOARD = """
         <div class="flex justify-between mt-2 text-[9px] text-zinc-500 uppercase font-bold"><span>0% (Safe)</span><span class="text-rose-500">4% (Killswitch)</span></div>
     </div>
 
-    <!-- STATS -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="premium-card p-4"><h3 class="text-[9px] text-zinc-400 font-bold uppercase mb-1">Live Equity</h3><div class="mono text-2xl font-bold text-accent-green" id="ui-eq">$0.00</div><div class="text-[9px] text-zinc-500 mt-1 uppercase">MT5 Terminal Sync</div></div>
         <div class="premium-card p-4"><h3 class="text-[9px] text-zinc-400 font-bold uppercase mb-1">Net P&L</h3><div class="mono text-2xl font-bold" id="ui-pnl">$0.00</div><div class="text-[9px] text-zinc-500 mt-1 uppercase">Session Total</div></div>
         <div class="premium-card p-4"><h3 class="text-[9px] text-zinc-400 font-bold uppercase mb-1">Profit Factor</h3><div class="mono text-2xl font-bold text-zinc-100" id="ui-pf">0.00</div><div class="text-[9px] text-zinc-500 mt-1 uppercase">Gross Win / Gross Loss</div></div>
-        <div class="premium-card p-4"><h3 class="text-[9px] text-zinc-400 font-bold uppercase mb-1">Risk Target</h3><div class="mono text-2xl font-bold text-blue-400" id="ui-risk">0.0%</div><div class="text-[8px] font-bold mt-1 uppercase text-indigo-400" id="ui-mode-txt">Prop Firm Mode</div></div>
+        <div class="premium-card p-4"><h3 class="text-[9px] text-zinc-400 font-bold uppercase mb-1">Risk Target</h3><div class="mono text-2xl font-bold text-blue-400" id="ui-risk">0.0%</div><div class="text-[8px] font-bold mt-1 uppercase text-indigo-400" id="ui-mode-txt">Evaluating...</div></div>
     </div>
 
-    <!-- CHARTS & TABLES -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-grow">
         <div class="flex flex-col gap-4 lg:col-span-1">
             <div class="premium-card p-4 flex flex-col h-[220px]">
@@ -392,8 +384,13 @@ DASHBOARD = """
             } catch (e) {}
         } fetchData(); setInterval(fetchData, 1500);
     </script>
-</body></html>
+</body>
+</html>
 """
+
 @app.route("/")
-def index(): return render_template_string(DASHBOARD)
-if __name__ == "__main__": app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+def index():
+    return render_template_string(DASHBOARD)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
